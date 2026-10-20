@@ -465,9 +465,9 @@ fn start_extraction(
     if !matches!(naming.as_str(), "paren" | "dash" | "stem") {
         return Err("Choose a file naming style.".into());
     }
-    let mode = mode.unwrap_or_else(|| "fast".into());
-    if !matches!(mode.as_str(), "fast" | "good" | "quality") {
-        return Err("Choose Fast, Good or Quality processing.".into());
+    let mode = mode.unwrap_or_else(|| "standard".into());
+    if !matches!(mode.as_str(), "fast" | "standard" | "hq") {
+        return Err("Choose Fast, Standard or HQ processing.".into());
     }
     let outputs: BTreeSet<String> = outputs.into_iter().collect();
     if outputs.is_empty() || !outputs.iter().all(|o| valid_output(o)) {
@@ -492,9 +492,15 @@ fn start_extraction(
         std::env::temp_dir().join(format!("stemwave-extract-{}-{stamp}", std::process::id()));
     fs::create_dir(&temp).map_err(|e| format!("Cannot create a working folder: {e}"))?;
     let progress_file = temp.join("progress.json");
+    let diagnostics = runtime_dir(&app)?.join("diagnostics");
+    fs::create_dir_all(&diagnostics).map_err(|e| e.to_string())?;
+    let diagnostics = diagnostics.join("latest.json");
+    fs::write(&diagnostics, b"{\"schema\":1,\"status\":\"starting\"}").map_err(|e| e.to_string())?;
     let launched = (|| -> std::io::Result<Child> {
         let log = fs::File::create(temp.join("worker.log"))?;
         engine_command(&rt, "separate.py")
+            .env("STEMWAVE_DIAGNOSTICS", &diagnostics)
+            .env("STEMWAVE_APP_VERSION", app.package_info().version.to_string())
             .arg(input)
             .arg(&output)
             .arg(outputs)
@@ -685,6 +691,24 @@ fn reveal_output(state: tauri::State<AppState>, path: String) -> Result<(), Stri
         Err("Finder could not open the output folder.".into())
     }
 }
+#[tauri::command]
+fn export_diagnostics(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<bool, String> {
+    let path = runtime_dir(&app)?.join("diagnostics/latest.json");
+    let bytes = fs::read(path).map_err(|_| "Run an extraction first to create a diagnostic report.")?;
+    let mut report: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "The diagnostic report is unavailable.")?;
+    if let Some(status) = &state.0.lock().unwrap().status {
+        report["app_status"] = serde_json::json!(status.status);
+        report["app_elapsed_seconds"] = serde_json::json!(status.elapsed_seconds);
+    }
+    let Some(target) = rfd::FileDialog::new().set_title("Save diagnostic report")
+        .set_file_name("StemWave-Extract-diagnostics.json").add_filter("Diagnostic report", &["json"]).save_file() else {
+        return Ok(false);
+    };
+    let data = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+    fs::write(target, data).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -694,6 +718,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            export_diagnostics,
             runtime_status,
             setup_runtime,
             choose_input,

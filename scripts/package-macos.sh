@@ -13,5 +13,7 @@ find "$APP/Contents/Resources/engine" -type d -name __pycache__ -prune -exec rm 
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 mkdir -p builds/release
-ditto -c -k --keepParent "$APP" builds/release/StemWave-Extract-0.1.0-arm64.zip
-(cd builds/release && shasum -a 256 StemWave-Extract-0.1.0-arm64.zip ffmpeg-7.1.tar.xz > SHA256SUMS.txt)
+VERSION=$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')
+ZIP="StemWave-Extract-${VERSION}-arm64.zip"
+ditto -c -k --keepParent "$APP" "builds/release/$ZIP"
+(cd builds/release && shasum -a 256 "$ZIP" ffmpeg-7.1.tar.xz > SHA256SUMS.txt)

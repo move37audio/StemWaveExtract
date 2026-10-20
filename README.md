@@ -6,7 +6,7 @@ A macOS app (Apple Silicon, macOS 13.6+) that splits any song into stems: Vocals
 
 - **Open a track:** click the square art tile or drop a file on the window (WAV, AIFF, FLAC, MP3, M4A, Ogg, up to 10 minutes). The waveform and embedded cover art appear at once. Tempo and downbeats are found in a few seconds.
 - **Choose stems:** use **+ Add stem**. It offers Acapella, Instrumental, any of the six stems, all remaining stems, and **Everything else** (one mix of every stem you didn't pick).
-- **Extract:** pick **Fast**, **Good** or **Quality**, then press Extract. Fast takes about half the song's length on an M1 Max. Good takes about 1–1.5×, and Quality about 3–4×. Output is float32 WAV.
+- **Extract:** pick **Fast**, **Standard** or **HQ**, then press Extract. Standard is the default. Fast trades overlapping predictions for speed; HQ adds extra averaging. Timing depends on the Mac and audio length. Output is float32 WAV.
 - **Listen:**
   - Click a lane to hear it alone, and ⌘-click to combine lanes.
   - **M** mutes a lane and **S** solos it. All lanes play sample-locked.
@@ -53,3 +53,10 @@ PYTHONDONTWRITEBYTECODE=1 vendor/runtime/python/bin/python3.10 tests/test_worker
 - beat_this code and published weights are MIT. uv is a build-only dependency (MIT/Apache-2.0).
 - **The separation checkpoint has no published license.** The release publisher has confirmed permission to redistribute it with this release. That permission is separate from this app’s MIT license; no additional checkpoint rights are granted here. Source builds fetch the pinned checkpoint into ignored release resources.
 - The bundled FFmpeg 7.1 is built from unmodified LGPL source without GPL/nonfree features. Its exact source archive is a release asset; configure flags are in the runtime license folder.
+
+## Testing 0.1.1-beta.1
+
+- FAST uses overlap 1 for quicker previews; STANDARD (default) uses the bundled Hugging Face config's overlap 2 and equivalent optimized attention; HQ uses overlap 4 and three-view averaging. All modes use the same checkpoint. HQ has a gold/white label with a CSS hover shimmer that respects reduced motion.
+- Waveform analysis preserves stereo energy instead of averaging channels into silence. Spectral, RGB DJ and Mono preserve opposite-phase stereo, and onset/frame-count regressions cover timeline alignment. Minimum macOS remains 13.6, Apple Silicon only. Compatibility on every Apple Silicon chip/macOS combination is not established by local tests.
+- Settings → **Save diagnostic report…** exports the last extraction's local timings, system/backend details, model/config hashes and inference settings. No audio, track names or paths, and no automatic upload. Reports live in the app's Application Support diagnostics folder and are replaced each run. Nothing extra is placed beside extracted WAV files.
+- Compare the same audio region, model/config hashes and settings when investigating performance. This build does not claim to resolve the reported 19-second versus 63-second throughput gap.

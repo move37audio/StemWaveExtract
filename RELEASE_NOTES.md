@@ -1,6 +1,11 @@
-# StemWave Extract 0.1.0
+# StemWave Extract 0.1.1-beta.1
 
-Separate songs into vocals, drums, bass, guitar, piano and other, with acapella and instrumental mixes. Includes Spectral and RGB DJ waveform styles. Extraction folders now contain only WAV audio.
+Beta testing release. Fully offline; both model checkpoints and the runtime are included.
+
+- Settings → **Save diagnostic report…** exports local timings, system/backend and model/settings details without audio, track names or paths. Nothing is uploaded automatically or placed beside extracted stems.
+- **FAST | STANDARD | HQ**. Standard defaults to the bundled Hugging Face config's overlap 2. Fast reduces overlap for preview speed; HQ adds averaging and has a gold/white hover shimmer with reduced-motion support.
+- Waveforms now render directly to each lane; stereo analysis no longer cancels opposite-polarity channels. This addresses the clipping/rendering path and flat-waveform bug, but still needs confirmation on affected Macs.
+- Tested on M1 Max / macOS 13.6.6: 15 Rust tests, 13 Python tests, UI checks, real Standard-mode extraction, signature and archive integrity. The reported performance difference versus other apps is not claimed fixed.
 
 - Apple Silicon only; macOS 13.6 or later.
 - **Unsigned release:** ad-hoc signed, without Apple Developer ID or notarization. After moving the app to Applications, right-click → Open. macOS may require approval in Privacy & Security.

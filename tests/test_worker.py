@@ -49,6 +49,28 @@ class ExportTests(unittest.TestCase):
             with self.assertRaises(ValueError): worker.export_selected(raw, out, {'bass'}, source)
             self.assertEqual(list(out.iterdir()), [])
 
+    def test_diagnostics_private_and_failure_safe(self):
+        import json
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / 'latest.json'
+            with patch.dict(os.environ, STEMWAVE_DIAGNOSTICS=str(report)), \
+                 patch.object(worker.subprocess, 'check_output', return_value='test hardware'):
+                diagnostics = worker.Diagnostics('quality', {'vocals', 'drums'}, True)
+                diagnostics.record('inference', overlap=4, chunks=12)
+                diagnostics.record('error', status='error', error_type='ValueError')
+                data = json.loads(report.read_text())
+                self.assertEqual(data['mode'], 'quality')
+                self.assertEqual(data['exports'], ['drums', 'vocals'])
+                self.assertEqual(data['status'], 'error')
+                self.assertEqual([e['stage'] for e in data['events']], ['starting', 'inference', 'error'])
+                self.assertNotIn(folder, report.read_text())
+                self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+                # An unavailable logging destination must not abort extraction.
+                diagnostics.path = str(Path(folder) / 'missing' / 'latest.json')
+                diagnostics.record('complete')
+
     def test_extraction_exports_only_audio(self):
         import json
         import sys
@@ -228,11 +250,12 @@ class MetalTests(unittest.TestCase):
                     worker.run(f / 'missing.wav', f, {'drums'}, f / 'p.json', start=start, end=end, tag=tag)
 
     def test_modes(self):
-        self.assertEqual(set(worker.MODES), {'fast', 'good', 'quality', 'original'})
-        self.assertEqual((worker.MODES['good']['overlap'], worker.MODES['good']['tta']), (4, False))
-        self.assertEqual((worker.MODES['quality']['overlap'], worker.MODES['quality']['tta']), (4, True))
+        self.assertEqual(set(worker.MODES), {'fast', 'standard', 'hq', 'original'})
+        self.assertEqual((worker.MODES['standard']['overlap'], worker.MODES['standard']['tta']), (None, False))
+        self.assertEqual((worker.MODES['hq']['overlap'], worker.MODES['hq']['tta']), (4, True))
         self.assertFalse(worker.MODES['original']['fast'] or worker.MODES['original']['tta'])
-        self.assertIsNone(worker.MODES['fast']['overlap'])
+        self.assertIsNone(worker.MODES['standard']['overlap'])
+        self.assertEqual(worker.MODES['fast']['overlap'], 1)
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaises(ValueError):
                 worker.run(Path(folder) / 'missing.wav', Path(folder), {'vocals'}, Path(folder) / 'p.json', mode='turbo')

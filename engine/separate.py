@@ -18,6 +18,39 @@ FFMPEG = os.environ.get('STEMWAVE_FFMPEG') or shutil.which('ffmpeg') or 'ffmpeg'
 NAMES = ['Bass', 'Drums', 'Other', 'Vocals', 'Guitar', 'Piano']
 OUTPUTS = {'acapella', 'instrumental', *(n.lower() for n in NAMES)}
 
+class Diagnostics:
+    """One local report, replaced each run; never records paths, audio or exception text."""
+    def __init__(self, mode, outputs, remainder):
+        import platform
+        self.path = os.environ.get('STEMWAVE_DIAGNOSTICS')
+        self.started = time.monotonic()
+        self.data = dict(schema=1, app_version=os.environ.get('STEMWAVE_APP_VERSION', 'development'),
+                         macos=platform.mac_ver()[0], architecture=platform.machine(),
+                         python=platform.python_version(), mode=mode, exports=sorted(outputs),
+                         remainder=remainder, model_stems=6, events=[])
+        for key, name in [('chip', 'machdep.cpu.brand_string'), ('memory_bytes', 'hw.memsize')]:
+            try:
+                self.data[key] = subprocess.check_output(['/usr/sbin/sysctl', '-n', name], text=True, timeout=2).strip()
+            except (OSError, subprocess.SubprocessError):
+                self.data[key] = 'unavailable'
+        self.record('starting')
+
+    def record(self, stage, **values):
+        self.data.update(values)
+        self.data['stage'] = stage
+        self.data['events'].append(dict(stage=stage, elapsed_seconds=round(time.monotonic() - self.started, 4)))
+        if not self.path:
+            return
+        try:
+            target = Path(self.path)
+            temporary = target.with_suffix('.tmp')
+            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as stream:
+                json.dump(self.data, stream, indent=2)
+            temporary.replace(target)
+        except OSError:
+            pass  # Diagnostics must not prevent audio extraction.
+
+
 class Progress:
     def __init__(self, path):
         self.path = path
@@ -116,15 +149,14 @@ def install_tta():
     bs_roformer.BSRoformer.forward = forward
 
 
-# fast: same math as upstream, faster attention. good: + 4x overlap (each sample averaged over
-# 4 chunk predictions instead of 2), ~2x fast. quality: + 3-view TTA too, ~6x fast.
-# original: upstream code untouched, same output as fast; kept for the CLI as a reference.
+# All modes use the bundled checkpoint; Standard preserves its inference overlap.
 MODES = {
-    'fast': dict(fast=True, overlap=None, tta=False, label='Fast'),
-    'good': dict(fast=True, overlap=4, tta=False, label='Good'),
-    'quality': dict(fast=True, overlap=4, tta=True, label='Quality'),
+    'fast': dict(fast=True, overlap=1, tta=False, label='Fast'),
+    'standard': dict(fast=True, overlap=None, tta=False, label='Standard'),
+    'hq': dict(fast=True, overlap=4, tta=True, label='HQ'),
     'original': dict(fast=False, overlap=None, tta=False, label='Original'),
 }
+
 
 
 def plan(outputs, remainder=False):
@@ -194,7 +226,7 @@ def export_selected(raw, destination, outputs, source_name, remainder=False, nam
     return frames
 
 
-def run(input_file, output_parent, outputs, progress_file, mode='fast', remainder=False, naming='paren', subfolder=True, start=None, end=None, tag=None):
+def run(input_file, output_parent, outputs, progress_file, mode='standard', remainder=False, naming='paren', subfolder=True, start=None, end=None, tag=None):
     """start/end (seconds) separate only that region; tag (e.g. "bars 5-8") is added to the file names."""
     if (start is None) != (end is None) or (start is not None and not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end and end - start <= 600)):
         raise ValueError('That loop region isn\'t valid.')
@@ -207,6 +239,7 @@ def run(input_file, output_parent, outputs, progress_file, mode='fast', remainde
     plan(outputs)
     if not input_file.is_file() or not output_parent.is_dir():
         raise ValueError('Choose an existing audio file and output folder.')
+    diagnostics = Diagnostics(mode, outputs, remainder)
     progress = Progress(progress_file)
     final, direct = None, []
     try:
@@ -219,6 +252,7 @@ def run(input_file, output_parent, outputs, progress_file, mode='fast', remainde
             duration = end - start
         if not math.isfinite(duration) or not 0 < duration <= 600:
             raise ValueError('Choose audio between 0 and 10 minutes long.')
+        diagnostics.record('decode', audio_seconds=duration, tta_views=3 if settings['tta'] else 1)
         work = progress_file.parent
         converted = work / 'input.wav'
         raw = work / 'stems'
@@ -227,6 +261,7 @@ def run(input_file, output_parent, outputs, progress_file, mode='fast', remainde
         # A loop region is cut after decoding (output-side seek), so it is sample-accurate.
         region = ['-ss', f'{start:.6f}', '-to', f'{end:.6f}'] if start is not None else ['-t', '600.001']
         subprocess.run([FFMPEG, '-nostdin', '-v', 'error', '-n', '-i', str(input_file), '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '44100', *region, '-c:a', 'pcm_f32le', str(converted)], check=True)
+        diagnostics.record('engine_import')
         progress.report('loading', .08, 'Loading the separation model — this can take a moment')
         sys.path.insert(0, str(ENGINE))
         import core
@@ -238,7 +273,8 @@ def run(input_file, output_parent, outputs, progress_file, mode='fast', remainde
             install_fast_attention()
         if settings['tta']:
             install_tta()
-        core.run(converted, raw, max_seconds=600, device="auto", device_callback=device_ready, overlap=settings['overlap'])
+        core.run(converted, raw, max_seconds=600, device="auto", device_callback=device_ready, overlap=settings['overlap'], diagnostic=diagnostics.record)
+        diagnostics.record('export')
         progress.report('exporting', .96, 'Writing your stems as float32 WAV files')
         if subfolder:
             prefix = ''.join(c if c.isalnum() or c in '-_ ' else '_' for c in input_file.stem)[:40] or 'Audio'
@@ -248,8 +284,10 @@ def run(input_file, output_parent, outputs, progress_file, mode='fast', remainde
             # path that exists after a failure was written by this run and is safe to remove.
             direct = [output_parent / name for name in planned.values()]
         export_selected(raw, final or output_parent, outputs, track, remainder, naming)
+        diagnostics.record('complete', status='complete')
         progress.report('complete', 1., 'Your stems are ready', 0., 'complete', final or output_parent, sorted(planned.values()))
     except BaseException as error:
+        diagnostics.record('error', status='cancelled' if isinstance(error, InterruptedError) else 'error', error_type=type(error).__name__)
         if final is not None:
             shutil.rmtree(final)
         for path in direct:
@@ -278,7 +316,7 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('outputs', type=lambda v: set(v.split(',')), help='comma-separated: ' + ','.join(sorted(OUTPUTS)))
     parser.add_argument('--progress-file', type=Path, required=True)
-    parser.add_argument('--mode', choices=sorted(MODES), default='fast')
+    parser.add_argument('--mode', choices=sorted(MODES), default='standard')
     parser.add_argument('--remainder', action='store_true', help='also export one mix of the stems not selected')
     parser.add_argument('--naming', choices=sorted(NAMING), default='paren')
     parser.add_argument('--no-subfolder', action='store_true', help='write stems directly into the output folder')

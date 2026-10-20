@@ -33,23 +33,32 @@ assert.deepEqual(Object.keys(PRESETS), ['spectral', 'rgb', 'mono']);
 // Lane pixels for each look: spectral edge + white-blended RMS core, RGB DJ without core, mono.
 {
   let image = null, blits = 0;
-  const sctx = {createImageData: (w, h) => ({data: new Uint8ClampedArray(w * h * 4)}), putImageData: i => { image = i; }};
+  const sctx = {createImageData: (w, h) => ({data: new Uint8ClampedArray(w * h * 4)}), putImageData: i => { image = i; blits++; }};
   globalThis.document = {createElement: () => ({getContext: () => sctx})};
   const data = new Uint8Array([255, 128, 200, 40, 10, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   const base = {peak: 1, bands: bandPeaks(data), coreColour: [255, 255, 255, .18], mono: [101, 223, 176]};
   const pixel = (x, y) => Array.from(image.data.slice((y * 2 + x) * 4, (y * 2 + x) * 4 + 4));
-  drawWave({drawImage: () => blits++}, data, {...base, colour: 'spectral', core: true}, 2, 20, 0, 1, .25);
+  drawWave(sctx, data, {...base, colour: 'spectral', core: true}, 2, 20, 0, 1, .25);
   assert.deepEqual(pixel(0, 5), [200, 40, 10, 255], 'peak edge keeps the spectral colour');
   assert.deepEqual(pixel(0, 10), [210, 79, 54, 255], 'RMS core is blended 18% toward white');
   assert.deepEqual(pixel(0, 0), [0, 0, 0, 0], 'outside the peak stays transparent');
   assert.deepEqual(pixel(1, 9), [0, 0, 0, 255], 'silent bin keeps a hairline');
-  drawWave({drawImage: () => blits++}, data, {...base, colour: 'rgb', core: false}, 2, 20, 0, 1, .25);
+  drawWave(sctx, data, {...base, colour: 'rgb', core: false}, 2, 20, 0, 1, .25);
   assert.deepEqual(pixel(0, 10), pixel(0, 5), 'no core in RGB DJ');
   assert.ok(pixel(0, 5)[0] > 200 && pixel(0, 5)[2] < 30, 'RGB DJ bass bin is red');
-  drawWave({drawImage: () => blits++}, data, {...base, colour: 'mono', core: false, peak: 4}, 2, 20, 0, 1, .25);
+  drawWave(sctx, data, {...base, colour: 'mono', core: false, peak: 4}, 2, 20, 0, 1, .25);
   assert.deepEqual(pixel(0, 9), [101, 223, 176, 255], 'mono colour');
   assert.deepEqual(pixel(0, 7), [0, 0, 0, 0], 'a larger shared peak draws the bar shorter');
   assert.equal(blits, 3);
+  // Odd/even backing dimensions and resize must retain both halves and the time origin.
+  for (const [w, h] of [[3, 21], [4, 40], [7, 83]]) {
+    drawWave(sctx, data, {...base, colour: 'spectral', core: true}, w, h, -1, 1, .44);
+    for (let y = 0; y < h; y++) {
+      assert.deepEqual(Array.from(image.data.slice((y * w + 1) * 4, (y * w + 2) * 4)),
+        Array.from(image.data.slice(((h - y - 1) * w + 1) * 4, ((h - y - 1) * w + 2) * 4)), 'both halves remain symmetric');
+      assert.equal(image.data[(y * w) * 4 + 3], 0, 'negative timeline stays empty');
+    }
+  }
   delete globalThis.document;
 }
 // A quantised pulse train must recover tempo and phase without inventing beats in silence.
@@ -137,7 +146,7 @@ class El {
 const ctx2d = new Proxy({createImageData: (w, h) => ({data: new Uint8ClampedArray(w * h * 4)})}, {get: (t, k) => (k in t ? t[k] : () => {}), set: (t, k, v) => { t[k] = v; return true; }});
 const byId = new Map(), body = new El('body'), docHandlers = {};
 const $ = id => { if (!byId.has(id)) { const el = new El('div', id); new El('label').appendChild(el); byId.set(id, el); if (id.startsWith('mode-')) el.tagName = 'INPUT'; } return byId.get(id); };
-$('mode-fast').checked = true; $('volume').value = '0.9';
+$('mode-standard').checked = true; $('volume').value = '0.9';
 $('play-icon').appendChild(new El('use'));
 const document = {getElementById: $, createElement: t => new El(t), createElementNS: (_, t) => new El(t), body, documentElement: new El('html'),
   addEventListener: (e, f) => { (docHandlers[e] ||= []).push(f); }};
@@ -165,6 +174,7 @@ const api = {core: {
     if (name === 'cover_art') return new Uint8Array([0xff, 0xd8, 0xff]).buffer;
     if (name === 'export_stem') return '/tmp/export/Track (Drums).wav';
     if (name === 'export_loop') return '/tmp/export';
+    if (name === 'export_diagnostics') return true;
     if (name === 'start_extraction' && startError) throw new Error(startError);
     return null;
   }},
@@ -184,6 +194,8 @@ const part = (l, cls) => l.find(n => n.classList.contains(cls));
   await $('retry-setup').fire('click'); await flush();
   assert.equal($('stage').textContent, 'Ready'); assert.equal($('choose-input').disabled, false);
   assert.equal($('extract').disabled, true);
+  assert.equal($('mode-standard').checked, true, 'Standard is the initial mode');
+  assert.match(fs.readFileSync(require.resolve('../ui/index.html'), 'utf8'), /id="mode-standard" value="standard" checked/);
   // Load: original lane, beats from the backend, playable once decoded.
   await $('choose-input').fire('click'); await flush(); await flush();
   assert.ok(lane('Original'));
@@ -242,10 +254,10 @@ const part = (l, cls) => l.find(n => n.classList.contains(cls));
   assert.equal($('zoom').textContent, '8 bars'); await $('zoom-in').fire('click'); await $('zoom-in').fire('click'); await $('zoom-in').fire('click'); await $('zoom-in').fire('click');
   assert.equal($('zoom').textContent, '1 bar');
   // Extract with Quality and the remainder.
-  $('mode-fast').checked = false; $('mode-quality').checked = true;
+  $('mode-standard').checked = false; $('mode-hq').checked = true;
   await $('extract').fire('click');
   const start = calls.filter(([n]) => n === 'start_extraction').at(-1)[1];
-  assert.deepEqual(JSON.parse(JSON.stringify(start)), {input: '/Music/Track.mp3', output: '/Music/Exports', outputs: ['acapella', 'drums'], mode: 'quality', remainder: true, naming: 'dash', subfolder: false});
+  assert.deepEqual(JSON.parse(JSON.stringify(start)), {input: '/Music/Track.mp3', output: '/Music/Exports', outputs: ['acapella', 'drums'], mode: 'hq', remainder: true, naming: 'dash', subfolder: false});
   assert.equal(addStem().disabled, true, 'selection locked while extracting');
   listeners['extraction-progress']({payload: {status: 'running', stage: 'loading', progress: .08, elapsed_seconds: 3, eta_seconds: null, message: 'Loading'}});
   assert.equal($('progress').value, undefined, 'indeterminate before speed is known');
@@ -352,5 +364,8 @@ const part = (l, cls) => l.find(n => n.classList.contains(cls));
   await $('extract').fire('click'); await flush();
   assert.equal($('stage').textContent, 'Couldn’t finish'); assert.match($('message').textContent, /Worker unavailable/);
   assert.equal($('extract').disabled, false);
+  await $('export-diagnostics').fire('click'); await flush();
+  assert.equal(calls.at(-1)[0], 'export_diagnostics');
+  assert.match($('message').textContent, /Diagnostic report saved/);
   console.log('UI load/beats/selection/extract/listen/combine/mute/solo/export/drop/error checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

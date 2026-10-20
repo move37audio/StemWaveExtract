@@ -219,3 +219,12 @@ progress:indeterminate::-webkit-progress-bar { background: transparent; }
 .stepper .tempo-value { display: grid; place-content: center; height: 100%; min-width: 92px; padding: 0 8px; font-variant-numeric: tabular-nums; border-inline: 1px solid var(--line); }
 .tempo-edit { width: 92px; height: 100%; border: 0; border-inline: 1px solid var(--line); background: var(--panel); color: var(--text); text-align: center; font: inherit; font-variant-numeric: tabular-nums; outline: none; }
 .tempo-value { cursor: text; user-select: none; }
+
+/* HQ shimmer stays local to the label and respects reduced motion. */
+.hq-label { color: #d8b660; font-weight: inherit; }
+@supports (-webkit-background-clip: text) {
+  .hq-label { background: linear-gradient(110deg, #b8892b, #f3d991 35%, #fff 50%, #f3d991 65%, #b8892b); background-size: 240% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .segmented label:hover .hq-label, .segmented input:focus-visible + span .hq-label { animation: hq-shimmer 1.5s ease-in-out infinite alternate; }
+}
+@keyframes hq-shimmer { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+@media (prefers-reduced-motion: reduce) { .segmented label:hover .hq-label, .segmented input:focus-visible + span .hq-label { animation: none; } }

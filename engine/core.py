@@ -36,7 +36,8 @@ def verify_checkpoint(checkpoint):
     return EXPECTED
 
 
-def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None, overlap=None):
+def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None, overlap=None, diagnostic=lambda *_a, **_k: None):
+    diagnostic('imports')
     import numpy as np
     import torch
     import torch.nn.functional as F
@@ -49,6 +50,7 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
     model = models_dir()
     from models.bs_roformer.bs_roformer import BSRoformer
 
+    diagnostic('read_audio', torch_version=torch.__version__, mps_available=torch.backends.mps.is_available(), mps_built=torch.backends.mps.is_built())
     rate, audio = wavfile.read(input_file)
     if rate != 44100 or audio.ndim != 2 or audio.shape[1] != 2 or audio.dtype != np.float32:
         raise ValueError('Separation needs stereo float32 WAV at 44.1 kHz.')
@@ -65,7 +67,9 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
     for key in ['freqs_per_bands', 'multi_stft_resolutions_window_sizes']:
         model_args[key] = tuple(model_args[key])
     checkpoint = model / 'BS-Rofo-SW-Fixed.ckpt'
+    diagnostic('verify_model')
     digest = verify_checkpoint(checkpoint)
+    diagnostic('load_model', model_sha256=digest, config_sha256=hashlib.sha256(config_text.encode()).hexdigest())
     torch.set_num_threads(4)
     torch.set_num_interop_threads(1)
     net = BSRoformer(**model_args)
@@ -73,6 +77,7 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
     if device not in ("cpu", "mps", "auto"):
         raise ValueError("Unsupported inference device.")
     device = ("mps" if torch.backends.mps.is_available() else "cpu") if device == "auto" else device
+    diagnostic('device_transfer', device=device, fft_device='cpu', dtype='float32')
     net.to(device).eval()
     if device_callback:
         device_callback(device)
@@ -93,6 +98,7 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
     window = torch.ones(chunk)
     window[:fade] = torch.linspace(0, 1, fade)
     window[-fade:] = torch.linspace(1, 0, fade)
+    diagnostic('inference', overlap=overlap, chunk_size=chunk, hop_size=step, chunks=len(range(0, source.shape[-1], step)), batch_size=1, threads=torch.get_num_threads(), interop_threads=torch.get_num_interop_threads())
     started = time.monotonic()
     with torch.inference_mode():
         for start in range(0, source.shape[-1], step):
@@ -102,6 +108,8 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
             predicted = net(part.unsqueeze(0).to(device))[0].cpu()
             if predicted.shape != (6, 2, chunk) or not torch.isfinite(predicted).all():
                 raise ValueError('Invalid six-stem model output.')
+            if start == 0:
+                diagnostic('first_chunk_complete', first_chunk_seconds=time.monotonic() - started)
             weight = window.clone()
             if start == 0:
                 weight[:fade] = 1
@@ -110,6 +118,7 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
             output[..., start:start + valid] += predicted[..., :valid] * weight[:valid]
             count[start:start + valid] += weight[:valid]
             write_progress(out, 0.05 + 0.9 * min(start + step, source.shape[-1]) / source.shape[-1])
+    diagnostic('reconstruct', inference_seconds=time.monotonic() - started)
     if not (count > 0).all():
         raise ValueError('Uncovered output samples.')
     output /= count
@@ -117,6 +126,7 @@ def run(input_file, out, *, max_seconds=120, device="cpu", device_callback=None,
         output = output[..., border:-border]
     if output.shape != (6, 2, length) or not torch.isfinite(output).all():
         raise ValueError('Invalid reconstructed stem length or values.')
+    diagnostic('write_intermediate_audio')
     for name, data in zip(NAMES, output.numpy()):
         wavfile.write(out / (name + '.wav'), 44100, data.T.copy())
     (out / 'result.json').write_text(json.dumps({'names': NAMES, 'frames': length, 'sample_rate': 44100, 'inference_seconds': time.monotonic() - started, 'device': device, 'overlap': overlap, 'threads': 4, 'chunk_size': chunk, 'sha256': digest}, indent=2))

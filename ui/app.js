@@ -11,11 +11,11 @@ const SOURCES = ['original', ...OUTPUTS, 'remainder'];
 const MODEL_STEMS = ['bass', 'drums', 'other', 'vocals', 'guitar', 'piano'];
 const LABELS = {remainder: 'Remaining mix', original: 'Original', acapella: 'Acapella', instrumental: 'Instrumental', vocals: 'Vocals', drums: 'Drums', bass: 'Bass', guitar: 'Guitar', piano: 'Piano', other: 'Other'};
 const ZOOM_BARS = [1, 2, 4, 8, 16, 32, 64];
-// Times measured on an M1 Max and scale with song length.
+// All modes use the same model; additional passes increase processing time.
 const MODES = {
-  fast: 'Fast: about half the song’s length.',
-  good: 'Good: each moment averaged from 4 overlapping passes instead of 2. About 1–1.5× the song’s length.',
-  quality: 'Quality: 4 overlapping passes, each also run with channels swapped and polarity flipped, then averaged. About 3–4× the song’s length.',
+  fast: 'Fast: fewer overlapping chunks for quicker previews; may reduce separation quality.',
+  standard: 'Standard: the bundled Hugging Face checkpoint and its original 2× overlap settings, with equivalent optimized attention.',
+  hq: 'HQ: the same checkpoint with 4× overlap and three averaged views. Roughly six times Standard’s inference work; no upscaling.',
 };
 // Stem identity colours for the lane dots (the waveforms carry the spectral colour).
 const DOTS = {original: '#c9ced6', acapella: '#f2c94c', instrumental: '#7fb3d5', vocals: '#f2c94c', drums: '#5fbf7f', bass: '#4aa3df', guitar: '#e5736f', piano: '#b49ddb', other: '#8fa1b3', remainder: '#9aa5b1'};
@@ -172,15 +172,13 @@ function columnColour(data, at, b0, b1, look) {
 // Per pixel column: the loudest bin as a peak bar, optionally with a lighter RMS core.
 // Written into one pixel buffer and composited once: thousands of fillRect calls with
 // fresh colour strings per lane per frame were the playback hot path.
-let scratch = null;
 function drawWave(ctx, data, look, w, h, startBin, binsPerPx, scale) {
-  if (!scratch || scratch.width !== w || scratch.height !== h) {
-    scratch = document.createElement('canvas'); scratch.width = w; scratch.height = h;
-  }
-  const sctx = scratch.getContext('2d'), image = sctx.createImageData(w, h), px = new Uint32Array(image.data.buffer);
+  if (w <= 0 || h <= 0) return;
+  // Write to the lane itself: no shared mutable canvas for WebKit to composite later.
+  const image = ctx.createImageData(w, h), px = image.data;
   const bins = data.length / FIELDS, mid = h / 2, height = h * scale / look.peak, k = look.colorScale ?? 1;
   const [cr, cg, cb, ca] = look.core ? look.coreColour : [0, 0, 0, 0];
-  const pack = (r, g, b) => (0xff000000 | ((b + .5) << 16) | ((g + .5) << 8) | (r + .5)) >>> 0; // rounds
+  const colour = (r, g, b) => [Math.round(r), Math.round(g), Math.round(b), 255];
   for (let x = 0; x < w; x++) {
     const raw = Math.floor(startBin + x * binsPerPx);
     const b0 = Math.max(0, raw), b1 = Math.min(bins, Math.max(raw + 1, Math.floor(startBin + (x + 1) * binsPerPx)));
@@ -192,14 +190,13 @@ function drawWave(ctx, data, look, w, h, startBin, binsPerPx, scale) {
     }
     const p = Math.max(0.5, Math.min(mid, level(top) * height)), r = look.core ? Math.min(mid, level(rms) * height) : 0;
     const [red, green, blue] = columnColour(data, at, b0, b1, look).map(v => v * k);
-    const edge = pack(red, green, blue);
-    const inner = pack(red + (cr - red) * ca, green + (cg - green) * ca, blue + (cb - blue) * ca);
+    const edge = colour(red, green, blue);
+    const inner = colour(red + (cr - red) * ca, green + (cg - green) * ca, blue + (cb - blue) * ca);
     for (let y = Math.floor(mid - p), end = Math.ceil(mid + p); y < end; y++) {
-      px[y * w + x] = Math.abs(y + .5 - mid) < r ? inner : edge;
+      px.set(Math.abs(y + .5 - mid) < r ? inner : edge, (y * w + x) * 4);
     }
   }
-  sctx.putImageData(image, 0, 0);
-  ctx.drawImage(scratch, 0, 0);
+  ctx.putImageData(image, 0, 0);
 }
 // Overview: loudness (RMS) bars against the track's loudest bin, so song sections stay readable;
 // colour blended across the column by loudness.
@@ -355,6 +352,12 @@ async function initialize() {
     $('settings').hidden = !open;
     $('settings-toggle').setAttribute('aria-expanded', String(open));
   };
+  $('export-diagnostics').addEventListener('click', async () => {
+    if (!api) { $('message').textContent = 'Diagnostics are available in the desktop app.'; return; }
+    try {
+      if (await api.core.invoke('export_diagnostics')) $('message').textContent = 'Diagnostic report saved. You can share it for troubleshooting.';
+    } catch (error) { $('message').textContent = String(error?.message || error); }
+  });
   $('settings-toggle').addEventListener('click', () => settingsOpen($('settings').hidden));
   document.addEventListener('pointerdown', e => {
     if (!$('settings').hidden && !$('settings').contains(e.target) && !$('settings-toggle').contains(e.target)) settingsOpen(false);
@@ -378,11 +381,11 @@ async function initialize() {
   }
 
   // ---- Stem selection ----
-  const mode = () => Object.keys(MODES).find(m => $(`mode-${m}`).checked) || 'fast';
-  if (MODES[store.get('stemwave-mode')]) $(`mode-${store.get('stemwave-mode')}`).checked = true;
+  const mode = () => Object.keys(MODES).find(m => $(`mode-${m}`).checked) || 'standard';
+  if (MODES[store.get('stemwave-mode-v2')]) $(`mode-${store.get('stemwave-mode-v2')}`).checked = true;
   for (const m of Object.keys(MODES)) {
     $(`mode-${m}`).parentElement.title = MODES[m];
-    $(`mode-${m}`).addEventListener('change', () => store.set('stemwave-mode', mode()));
+    $(`mode-${m}`).addEventListener('change', () => store.set('stemwave-mode-v2', mode()));
   }
   const plan = () => exportPlan([...selected], remainder);
   function selectionChanged() { showLanes(); controls(); }
@@ -757,6 +760,7 @@ async function initialize() {
     if (!w) return;
     const binsPerPx = span() * BINS_PER_SECOND / w, startBin = t * BINS_PER_SECOND - w * PLAYHEAD * binsPerPx;
     const showGrid = grid && gridVisible;
+    if (src?.data) drawWave(c, src.data, look(src), w, hgt, startBin - (src.offset || 0) * BINS_PER_SECOND, binsPerPx, 0.44);
     if (!showGrid) {
       const step = [1, 2, 5, 10, 15, 30, 60].find(s => s * BINS_PER_SECOND / binsPerPx >= 70 * dpr) || 60;
       c.font = `${10 * dpr}px -apple-system, sans-serif`;
@@ -767,7 +771,6 @@ async function initialize() {
         c.fillStyle = light ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.07)'; c.fillRect(x, 0, 1, hgt);
       }
     }
-    if (src?.data) drawWave(c, src.data, look(src), w, hgt, startBin - (src.offset || 0) * BINS_PER_SECOND, binsPerPx, 0.44);
     c.fillStyle = light ? 'rgba(0,0,0,.12)' : 'rgba(255,255,255,.12)'; c.fillRect(0, hgt / 2, w, 1);
     if (!audible) { c.fillStyle = light ? 'rgba(236,235,230,.45)' : 'rgba(16,20,25,.5)'; c.fillRect(0, 0, w, hgt); }
     if (showGrid) {

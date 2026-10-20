@@ -91,10 +91,16 @@ impl Spectrum {
     }
 
     /// Detail colour of one frame (zero-padded when short).
-    fn colour(&self, frame: &[f64]) -> [u8; 3] {
+    fn stereo_colour(&self, left: &[f64], right: &[f64]) -> [u8; 3] {
         let mut padded = [0.; N];
-        padded[..frame.len()].copy_from_slice(frame);
-        let m = self.magnitudes(&padded);
+        padded[..left.len()].copy_from_slice(left);
+        let mut other = [0.; N];
+        other[..right.len()].copy_from_slice(right);
+        let energy_l = padded.iter().map(|v| v * v).sum::<f64>() / N as f64;
+        let energy_r = other.iter().map(|v| v * v).sum::<f64>() / N as f64;
+        let a = self.magnitudes(&padded);
+        let b = self.magnitudes(&other);
+        let m: Vec<f64> = a.iter().zip(b).map(|(a, b)| a * energy_l.sqrt() + b * energy_r.sqrt()).collect();
         let mut scores: Vec<(f64, f64)> =
             self.filters.iter().zip(BANDS).map(|(f, (_, _, hue))| (f.iter().zip(&m).map(|(a, b)| a * b).sum(), hue)).collect();
         let max = scores.iter().map(|s| s.0).fold(0., f64::max);
@@ -115,7 +121,7 @@ impl Spectrum {
         } else {
             [0.; 3]
         };
-        let rms = (padded.iter().map(|v| v * v).sum::<f64>() / N as f64).sqrt();
+        let rms = ((energy_l + energy_r) * 0.5).sqrt();
         let light = brightness(rms);
         base.map(|c| ((light * c + (1. - light) * 0.2).clamp(0., 1.) * 255.).round() as u8)
     }
@@ -148,14 +154,16 @@ fn hsv(h: f64, s: f64) -> [f64; 3] {
 pub fn analyze(reader: &mut impl Read, max_frames: usize) -> std::io::Result<Vec<u8>> {
     let spectrum = Spectrum::new();
     let (mut bytes, mut pending) = (vec![0u8; 65536], Vec::new());
-    let mut mono: Vec<f64> = Vec::new(); // samples from `base` on
+    let (mut spectrum_l, mut spectrum_r) = (Vec::new(), Vec::new()); // samples from `base` on
     let (mut base, mut total) = (0usize, 0usize);
     let (mut bins, mut colours) = (Vec::new(), Vec::new());
     let (mut peak, mut sum, mut count) = (0f64, 0f64, 0usize);
     let encode = |v: f64| (v.clamp(0., 1.).sqrt() * 255.).round() as u8;
     let mut three_band = stemwave_core::Analyzer::new(BIN as u32);
+    let mut three_band_r = stemwave_core::Analyzer::new(BIN as u32);
     let mut band_out = vec![stemwave_core::SwBin::default(); 65536 / 8 / BIN + 1];
     let mut band_index = vec![0i64; band_out.len()];
+    let mut band_out_r = band_out.clone();
     let (mut left, mut right, mut bands) = (Vec::new(), Vec::new(), Vec::new());
     loop {
         let n = reader.read(&mut bytes)?;
@@ -170,26 +178,32 @@ pub fn analyze(reader: &mut impl Read, max_frames: usize) -> std::io::Result<Vec
         for frame in pending[..whole].chunks_exact(8) {
             let l = f32::from_le_bytes(frame[..4].try_into().unwrap());
             let r = f32::from_le_bytes(frame[4..].try_into().unwrap());
+            let l = if l.is_finite() { l } else { 0. };
+            let r = if r.is_finite() { r } else { 0. };
             left.push(l);
             right.push(r);
-            let s = (l as f64 + r as f64) * 0.5;
-            let s = if s.is_finite() { s } else { 0. };
-            mono.push(s);
-            (peak, sum, count) = (peak.max(s.abs()), sum + s * s, count + 1);
+            let (l, r) = (l as f64, r as f64);
+            spectrum_l.push(l);
+            spectrum_r.push(r);
+            // Stereo energy must not disappear when the channels have opposite polarity.
+            (peak, sum, count) = (peak.max(l.abs()).max(r.abs()), sum + (l * l + r * r) * 0.5, count + 1);
             if count == BIN {
                 bins.push((peak, (sum / BIN as f64).sqrt()));
                 (peak, sum, count) = (0., 0., 0);
             }
         }
         let start = (total - whole / 8) as i64;
-        let written = three_band.process(&left, Some(&right), start, &mut band_out, &mut band_index);
+        let written = three_band.process(&left, None, start, &mut band_out, &mut band_index);
+        let written_r = three_band_r.process(&right, None, start, &mut band_out_r, &mut band_index);
+        debug_assert_eq!(written, written_r);
         let band = |v: f32| ((v * 0.5).clamp(0., 1.).sqrt() * 255.) as u8;
-        bands.extend(band_out[..written].iter().map(|b| [band(b.low), band(b.mid), band(b.high)]));
+        bands.extend(band_out[..written].iter().zip(&band_out_r).map(|(l, r)| [band(l.low.max(r.low)), band(l.mid.max(r.mid)), band(l.high.max(r.high))]));
         pending.drain(..whole);
         // Full frames, starting every HOP samples.
-        while mono.len() >= N {
-            colours.push(spectrum.colour(&mono[..N]));
-            mono.drain(..HOP);
+        while spectrum_l.len() >= N {
+            colours.push(spectrum.stereo_colour(&spectrum_l[..N], &spectrum_r[..N]));
+            spectrum_l.drain(..HOP);
+            spectrum_r.drain(..HOP);
             base += HOP;
         }
         if n == 0 {
@@ -201,7 +215,7 @@ pub fn analyze(reader: &mut impl Read, max_frames: usize) -> std::io::Result<Vec
     }
     // The first incomplete window is zero-padded and ends the frame sequence.
     if base < total || colours.is_empty() {
-        colours.push(spectrum.colour(&mono));
+        colours.push(spectrum.stereo_colour(&spectrum_l, &spectrum_r));
     }
     let mut out = Vec::with_capacity(bins.len() * RECORD);
     for (i, (peak, rms)) in bins.into_iter().enumerate() {
@@ -217,6 +231,19 @@ pub fn analyze(reader: &mut impl Read, max_frames: usize) -> std::io::Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stereo_polarity_preserves_levels_colours_and_alignment() {
+        let mut signal = vec![0.; BIN * 3];
+        signal.extend(sine(440., BIN * 10 + 7, 0.5));
+        let stereo = |invert: bool| signal.iter().flat_map(|x| [x.to_le_bytes(), (if invert { -*x } else { *x }).to_le_bytes()].concat()).collect::<Vec<_>>();
+        let normal = analyze(&mut &stereo(false)[..], signal.len()).unwrap();
+        let opposite = analyze(&mut &stereo(true)[..], signal.len()).unwrap();
+        assert_eq!(normal, opposite, "stereo polarity must not erase or move waveforms in any style");
+        assert_eq!(normal.len(), signal.len().div_ceil(BIN) * RECORD);
+        assert!(normal.chunks_exact(RECORD).take(3).all(|r| r[0] == 0));
+        assert!(normal[3 * RECORD] > 0, "onset stays at the source bin");
+    }
 
     fn pcm(mono: &[f32]) -> Vec<u8> {
         mono.iter().flat_map(|s| [s.to_le_bytes(), s.to_le_bytes()].concat()).collect()

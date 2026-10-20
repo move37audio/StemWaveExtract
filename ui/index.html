@@ -75,6 +75,11 @@
           <div class="setting-line"><span>Own folder per extraction</span><button id="subfolder" class="switch" type="button" role="switch" aria-pressed="true" aria-label="New folder for each extraction"></button></div>
           <p id="naming-example" class="example"></p>
         </section>
+        <section class="settings-group">
+          <h3>Diagnostics</h3>
+          <button id="export-diagnostics" class="ctl" type="button">Save diagnostic report…</button>
+          <p class="example">Last extraction only. Includes timings and system/model settings, without audio, track names or file paths. Nothing is uploaded.</p>
+        </section>
       </div>
     </header>
 
@@ -114,9 +119,9 @@
           <label class="volume ctl"><svg><use href="#i-volume"/></svg><input id="volume" type="range" min="0" max="1" step="0.01" value="0.9" aria-label="Volume"><b id="volume-value">90%</b></label>
           <span class="spacer"></span>
           <div class="segmented" role="radiogroup" aria-label="Separation quality">
-            <label><input type="radio" name="mode" id="mode-fast" value="fast" checked><span>Fast</span></label>
-            <label><input type="radio" name="mode" id="mode-good" value="good"><span>Good</span></label>
-            <label><input type="radio" name="mode" id="mode-quality" value="quality"><span>Quality</span></label>
+            <label><input type="radio" name="mode" id="mode-fast" value="fast"><span>Fast</span></label>
+            <label><input type="radio" name="mode" id="mode-standard" value="standard" checked><span>Standard</span></label>
+            <label><input type="radio" name="mode" id="mode-hq" value="hq"><span><b class="hq-label">HQ</b></span></label>
           </div>
           <button id="extract" class="primary" type="button" disabled><span class="label-part"><svg><use href="#i-split"/></svg><span id="extract-label">Extract</span></span><span class="arrow" aria-hidden="true">→</span></button>
         </div>
