@@ -1,0 +1,10 @@
+[workspace]
+members = ["src-tauri", "crates/stemwave_core"]
+resolver = "2"
+
+[profile.release]
+# Smallest, fastest app binary: whole-program optimisation, symbols stripped.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

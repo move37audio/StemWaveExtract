@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StemWave Extract",
+  "version": "0.1.0",
+  "identifier": "com.stemwave.extract",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "StemWave Extract",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 760,
+        "minHeight": 760
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost asset: http://asset.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.6"
+    },
+    "resources": {
+      "../engine/": "engine/",
+      "../vendor/runtime/": "runtime/"
+    }
+  }
+}
